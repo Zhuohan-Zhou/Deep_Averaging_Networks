@@ -1,0 +1,9 @@
+# LaTeX report sources and generated deliverables
+/report/
+/output/pdf/cse256_pa1_report.pdf
+/output/pdf/cse256_pa1_report_sources.zip
+
+# Measurements generated for the report
+/results/report_bow/
+/results/report_word_glove/
+/results/report_word_random/

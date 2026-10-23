@@ -1,25 +1,19 @@
-# Sentiment classification: BOW, DAN and Subword DAN
+# CSE256 Project 1: Deep Averaging Networks | Byte Pair Encoding | Skip-Gram
 
-Activate your Python environment and install the dependencies:
-
+Install the dependencies:
 ```bash
-conda activate cse256-pa1
 python -m pip install torch numpy scikit-learn matplotlib
 ```
 
 Run these commands from the directory containing `main.py`:
-
 ```bash
-# Provided bag-of-words baselines (two and three linear layers).
-python main.py --model BOW
-
 # Part 1a: DAN with trainable, GloVe-initialized embeddings.
 python main.py --model DAN
 
 # Use the provided 300-dimensional GloVe vectors instead of 50-dimensional ones.
 python main.py --model DAN --embedding-dim 300
 
-# Part 1b: same vocabulary and architecture, but random trainable embeddings.
+# Part 1b: random trainable embeddings.
 python main.py --model DAN --random-embeddings
 
 # Part 2: learn BPE from train.txt, then train a DAN over its subwords.
@@ -88,10 +82,7 @@ rate 0.001, 20 epochs and seed 42. `--embedding-dim 300` also works for subwords
 Each subword run writes a vocabulary/seed-specific accuracy PNG and metrics JSON,
 for example `subworddan_v1000_seed42_metrics.json`. The JSON records BPE learning
 time, encoding time, average train/dev subword lengths, actual vocabulary size,
-model parameter count, and all epoch metrics. Model training time excludes BPE
-learning and data preparation, so compare those times separately or add data
-loading time to model training time for a combined preprocessing/training cost.
-Plots are not overwritten by runs with a different vocabulary size or seed.
+model parameter count, and all epoch metrics.
 
 ## Configuration
 
@@ -105,52 +96,3 @@ For example:
 python main.py --model DAN --epochs 20 --lr 0.001 --batch-size 32 --hidden-size 100 --dropout 0.3 --seed 42
 python main.py --help
 ```
-
-Data paths are resolved relative to `main.py`, so the script can also be run
-from another directory. Plot paths are relative to the current working directory.
-
-## Verified run
-
-With the default command `python main.py --model DAN`, Python 3.11 and PyTorch
-2.14.1 on this Mac, the best dev accuracy was **79.82% at epoch 5**. The final
-epoch (20) reached 78.6% dev accuracy. The training loop took 16.7 seconds,
-excluding imports and data loading. These are results from one seed (42), not
-an average across runs; other environments may produce different results.
-
-Training accuracy continued to rise while dev loss increased after the early
-epochs, indicating overfitting. The printed best score is an observed dev-set
-result; the code does not restore the parameters from that epoch.
-
-### Subword vocabulary comparison
-
-All three runs below use the same default model settings (50d random embeddings,
-hidden size 100, dropout 0.3, Adam at 0.001, batch size 32, 20 epochs, seed 42).
-Times are measured on this Mac and are not averaged across repeated runs.
-
-| Actual vocabulary | Best dev accuracy | Best epoch | BPE learning (s) | Model training (s) | Mean train subwords/sentence |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 500 | 70.76% | 8 | 15.25 | 3.83 | 42.02 |
-| 1000 | 75.46% | 14 | 31.85 | 4.52 | 35.18 |
-| 2000 | 76.26% | 10 | 63.56 | 4.93 | 29.91 |
-
-The raw summary is in `results/subword_comparison.csv`; each run's JSON and plot
-are in its `results/subword_vSIZE` folder. These results show higher best dev
-accuracy and shorter input sequences with larger vocabularies, alongside larger
-embedding tables and more expensive BPE learning. The 2000-symbol model's best
-score remains below the word-level GloVe model's 79.82%. Later epochs can overfit,
-so distinguish the best observed dev score from final-epoch accuracy. This is a
-single-seed comparison and does not establish a universal ranking.
-
-## Checks
-
-```bash
-python -m unittest -v test_dan test_bpe
-```
-
-The 15 checks cover unknown words, empty sentences, padding invariance, finite
-outputs for all-padding input, gradient updates, embedding initialization, BPE
-frequency weighting, deterministic merges, merge application, word boundaries,
-vocabulary-size handling and tokenizer reuse without dev vocabulary leakage.
-
-This implementation covers word-level DAN (Part 1) and BPE/Subword DAN (Part 2).
-The skip-gram exercises (Part 3) and the written report are separate deliverables.
