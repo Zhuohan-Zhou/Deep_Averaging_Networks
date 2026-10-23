@@ -2,14 +2,17 @@
 
 import torch
 from torch import nn
-from sentiment_data import read_word_embeddings
+from sentiment_data import read_word_embeddings, read_sentiment_examples
 import time
 import argparse
+import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from BOWmodels import SentimentDatasetBOW, NN2BOW, NN3BOW
 from DANmodels import DAN, SentimentDatasetDAN, collate_dan_batch
+from bpe import BPETokenizer
+from SUBWORDDANmodels import SubwordDAN, SentimentDatasetSubwordDAN
 
 
 # Training function
@@ -55,7 +58,7 @@ def eval_epoch(data_loader, model, loss_fn, optimizer=None):
 
 # Experiment function to run training and evaluation for multiple epochs
 def experiment(model, train_loader, test_loader, epochs=100, lr=0.0001,
-               loss_fn=None, log_every=10):
+               loss_fn=None, log_every=10, metrics=None):
     if loss_fn is None:
         loss_fn = nn.NLLLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -64,6 +67,7 @@ def experiment(model, train_loader, test_loader, epochs=100, lr=0.0001,
     all_test_accuracy = []
     best_dev_accuracy = -1.0
     best_epoch = 0
+    history = []
     start_time = time.time()
     for epoch in range(epochs):
         train_accuracy, train_loss = train_epoch(train_loader, model, loss_fn, optimizer)
@@ -71,6 +75,13 @@ def experiment(model, train_loader, test_loader, epochs=100, lr=0.0001,
 
         test_accuracy, test_loss = eval_epoch(test_loader, model, loss_fn, optimizer)
         all_test_accuracy.append(test_accuracy)
+        history.append({
+            'epoch': epoch + 1,
+            'train_loss': train_loss,
+            'train_accuracy': train_accuracy,
+            'dev_loss': test_loss,
+            'dev_accuracy': test_accuracy,
+        })
 
         if test_accuracy > best_dev_accuracy:
             best_dev_accuracy = test_accuracy
@@ -81,8 +92,17 @@ def experiment(model, train_loader, test_loader, epochs=100, lr=0.0001,
                   f'train accuracy {train_accuracy:.3f}, dev loss {test_loss:.4f}, '
                   f'dev accuracy {test_accuracy:.3f}', flush=True)
 
+    training_seconds = time.time() - start_time
     print(f'Best dev accuracy: {best_dev_accuracy:.4f} at epoch {best_epoch}; '
-          f'training time: {time.time() - start_time:.1f}s')
+          f'training time: {training_seconds:.1f}s')
+    if metrics is not None:
+        metrics.update({
+            'best_dev_accuracy': best_dev_accuracy,
+            'best_epoch': best_epoch,
+            'final_dev_accuracy': all_test_accuracy[-1],
+            'training_seconds': training_seconds,
+            'history': history,
+        })
     
     return all_train_accuracy, all_test_accuracy
 
@@ -91,17 +111,21 @@ def main():
 
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Run model training based on specified model type')
-    parser.add_argument('--model', choices=['BOW', 'DAN'], required=True)
+    parser.add_argument('--model', choices=['BOW', 'DAN', 'SUBWORDDAN'], required=True)
     parser.add_argument('--epochs', type=int, default=None,
-                        help='Default: 100 for BOW, 20 for DAN')
+                        help='Default: 100 for BOW, 20 for DAN/SUBWORDDAN')
     parser.add_argument('--lr', type=float, default=None,
-                        help='Default: 0.0001 for BOW, 0.001 for DAN')
+                        help='Default: 0.0001 for BOW, 0.001 for DAN/SUBWORDDAN')
     parser.add_argument('--batch-size', type=int, default=None,
-                        help='Default: 16 for BOW, 32 for DAN')
+                        help='Default: 16 for BOW, 32 for DAN/SUBWORDDAN')
     parser.add_argument('--hidden-size', type=int, default=100)
     parser.add_argument('--dropout', type=float, default=0.3,
                         help='DAN hidden-layer dropout probability')
     parser.add_argument('--embedding-dim', type=int, choices=[50, 300], default=50)
+    parser.add_argument('--vocab-size', type=int, default=1000,
+                        help='SUBWORDDAN: target BPE vocabulary size including PAD/UNK')
+    parser.add_argument('--output-dir', type=Path, default=Path('.'),
+                        help='Directory for plots and DAN experiment metrics')
     embedding_options = parser.add_mutually_exclusive_group()
     embedding_options.add_argument('--random-embeddings', action='store_true',
                                    help='DAN: train random embeddings instead of GloVe')
@@ -123,6 +147,10 @@ def main():
         parser.error('--hidden-size and --threads must be positive')
     if not 0 <= args.dropout < 1:
         parser.error('--dropout must be between 0 (inclusive) and 1 (exclusive)')
+    if args.model == 'SUBWORDDAN' and args.vocab_size < 3:
+        parser.error('--vocab-size must be at least 3')
+    if args.model == 'SUBWORDDAN' and args.freeze_embeddings:
+        parser.error('SUBWORDDAN requires trainable random embeddings, not --freeze-embeddings')
 
     torch.manual_seed(args.seed)
     torch.set_num_threads(args.threads)
@@ -130,21 +158,57 @@ def main():
     epochs = args.epochs if args.epochs is not None else (100 if args.model == 'BOW' else 20)
     lr = args.lr if args.lr is not None else (0.0001 if args.model == 'BOW' else 0.001)
     batch_size = args.batch_size if args.batch_size is not None else (16 if args.model == 'BOW' else 32)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load dataset
     start_time = time.time()
+    data_metrics = {}
 
     collate_fn = None
     if args.model == 'BOW':
         train_data = SentimentDatasetBOW(data_dir / 'train.txt')
         dev_data = SentimentDatasetBOW(data_dir / 'dev.txt', vectorizer=train_data.vectorizer, train=False)
-    else:
+    elif args.model == 'DAN':
         word_embeddings = read_word_embeddings(
             str(data_dir / f'glove.6B.{args.embedding_dim}d-relativized.txt')
         )
         train_data = SentimentDatasetDAN(data_dir / 'train.txt', word_embeddings.word_indexer)
         dev_data = SentimentDatasetDAN(data_dir / 'dev.txt', word_embeddings.word_indexer)
         collate_fn = collate_dan_batch
+    else:
+        train_examples = read_sentiment_examples(data_dir / 'train.txt')
+        dev_examples = read_sentiment_examples(data_dir / 'dev.txt')
+        tokenizer = BPETokenizer(vocab_size=args.vocab_size)
+        print(f'Learning BPE on training text (target vocabulary '
+              f'{args.vocab_size})...', flush=True)
+        bpe_start = time.time()
+        try:
+            # Only training text is used to learn symbols and merge rules.
+            tokenizer.fit(example.words for example in train_examples)
+        except ValueError as error:
+            parser.error(str(error))
+        bpe_seconds = time.time() - bpe_start
+        print(f'BPE trained in {bpe_seconds:.2f}s: requested vocabulary '
+              f'{args.vocab_size}, actual {len(tokenizer)}, '
+              f'{len(tokenizer.merges)} merges', flush=True)
+
+        encoding_start = time.time()
+        train_data = SentimentDatasetSubwordDAN(train_examples, tokenizer)
+        dev_data = SentimentDatasetSubwordDAN(dev_examples, tokenizer)
+        encoding_seconds = time.time() - encoding_start
+        collate_fn = collate_dan_batch
+        data_metrics = {
+            'requested_vocab_size': args.vocab_size,
+            'actual_vocab_size': len(tokenizer),
+            'num_merges': len(tokenizer.merges),
+            'bpe_training_seconds': bpe_seconds,
+            'encoding_seconds': encoding_seconds,
+            'train_average_subwords': train_data.average_length(),
+            'dev_average_subwords': dev_data.average_length(),
+        }
+        print(f'Average subwords per sentence: train '
+              f'{data_metrics["train_average_subwords"]:.2f}, '
+              f'dev {data_metrics["dev_average_subwords"]:.2f}', flush=True)
 
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True,
                               collate_fn=collate_fn)
@@ -153,6 +217,7 @@ def main():
 
     end_time = time.time()
     elapsed_time = end_time - start_time
+    data_metrics['data_loading_seconds'] = elapsed_time
     print(f"Data loaded in : {elapsed_time} seconds")
 
 
@@ -182,7 +247,7 @@ def main():
         plt.grid()
 
         # Save the training accuracy figure
-        training_accuracy_file = 'train_accuracy.png'
+        training_accuracy_file = args.output_dir / 'train_accuracy.png'
         plt.savefig(training_accuracy_file)
         plt.close()
         print(f"\n\nTraining accuracy plot saved as {training_accuracy_file}")
@@ -198,35 +263,58 @@ def main():
         plt.grid()
 
         # Save the testing accuracy figure
-        testing_accuracy_file = 'dev_accuracy.png'
+        testing_accuracy_file = args.output_dir / 'dev_accuracy.png'
         plt.savefig(testing_accuracy_file)
         plt.close()
         print(f"Dev accuracy plot saved as {testing_accuracy_file}\n\n")
 
         # plt.show()
 
-    elif args.model == "DAN":
-        model = DAN(word_embeddings, hidden_size=args.hidden_size,
-                    dropout=args.dropout, random_embeddings=args.random_embeddings,
-                    frozen=args.freeze_embeddings)
-        initialization = 'random' if args.random_embeddings else 'GloVe'
-        print(f'\nDAN: {initialization}, {args.embedding_dim}d embeddings, '
+    else:
+        if args.model == 'DAN':
+            model = DAN(word_embeddings, hidden_size=args.hidden_size,
+                        dropout=args.dropout, random_embeddings=args.random_embeddings,
+                        frozen=args.freeze_embeddings)
+            initialization = 'random' if args.random_embeddings else 'GloVe'
+            output_stem = 'dan'
+        else:
+            model = SubwordDAN(len(tokenizer), embedding_dim=args.embedding_dim,
+                               hidden_size=args.hidden_size, dropout=args.dropout)
+            initialization = 'random BPE'
+            output_stem = f'subworddan_v{args.vocab_size}_seed{args.seed}'
+        print(f'\n{args.model}: {initialization}, {args.embedding_dim}d embeddings, '
               f'hidden size {args.hidden_size}, seed {args.seed}', flush=True)
+        training_metrics = {}
         train_accuracy, dev_accuracy = experiment(
             model, train_loader, test_loader, epochs=epochs, lr=lr,
             loss_fn=nn.CrossEntropyLoss(), log_every=1,
+            metrics=training_metrics,
         )
         plt.figure(figsize=(8, 6))
         plt.plot(range(1, epochs + 1), train_accuracy, label='Train')
         plt.plot(range(1, epochs + 1), dev_accuracy, label='Dev')
         plt.xlabel('Epochs')
         plt.ylabel('Accuracy')
-        plt.title('DAN Training and Dev Accuracy')
+        plt.title(f'{args.model} Training and Dev Accuracy')
         plt.legend()
         plt.grid()
-        plt.savefig('dan_accuracy.png')
+        plot_path = args.output_dir / f'{output_stem}_accuracy.png'
+        plt.savefig(plot_path)
         plt.close()
-        print('Accuracy plot saved as dan_accuracy.png')
+        print(f'Accuracy plot saved as {plot_path}')
+        config = dict(vars(args))
+        config.update(epochs=epochs, lr=lr, batch_size=batch_size,
+                      embedding_initialization=initialization)
+        result = {
+            'config': config,
+            'data': data_metrics,
+            'model_parameters': sum(parameter.numel() for parameter in model.parameters()),
+            'pytorch_version': str(torch.__version__),
+            'training': training_metrics,
+        }
+        metrics_path = args.output_dir / f'{output_stem}_metrics.json'
+        metrics_path.write_text(json.dumps(result, indent=2, default=str) + '\n')
+        print(f'Experiment metrics saved as {metrics_path}')
 
 if __name__ == "__main__":
     main()

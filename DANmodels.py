@@ -32,7 +32,7 @@ class SentimentDatasetDAN(Dataset):
 
 
 def collate_dan_batch(batch):
-    """Pad only to the longest sentence in this batch"""
+    """Pad only to the longest sentence in this batch; labels remain integers."""
     word_ids, labels = zip(*batch)
     padded = pad_sequence(word_ids, batch_first=True, padding_value=PAD_IDX)
     return padded, torch.tensor(labels, dtype=torch.long)
@@ -40,6 +40,7 @@ def collate_dan_batch(batch):
 
 class DAN(nn.Module):
     """Word embeddings -> masked average -> feedforward sentiment classifier."""
+
     def __init__(self, word_embeddings, hidden_size=100, dropout=0.3,
                  random_embeddings=False, frozen=False):
         super().__init__()
@@ -51,8 +52,7 @@ class DAN(nn.Module):
                 padding_idx=PAD_IDX,
             )
         else:
-            # Start with GloVe vectors
-            # fine-tune them unless frozen=True.
+            # Start with GloVe vectors; fine-tune them unless frozen=True.
             self.embedding = word_embeddings.get_initialized_embedding_layer(
                 frozen=frozen
             )
@@ -69,8 +69,11 @@ class DAN(nn.Module):
         # [batch, length] -> [batch, length, embedding_dim]
         vectors = self.embedding(word_ids)
 
+        # Ignore PAD in both the sum and the denominator of the average.
         mask = (word_ids != PAD_IDX).unsqueeze(-1)
         summed = (vectors * mask).sum(dim=1)
         lengths = mask.sum(dim=1).clamp(min=1)
         averaged = summed / lengths
+
+        # Raw scores (logits), to be used with CrossEntropyLoss.
         return self.classifier(averaged)
