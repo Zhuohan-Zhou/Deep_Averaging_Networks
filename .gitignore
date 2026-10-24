@@ -5,9 +5,6 @@
 __pycache__/
 *.py[cod]
 
-# Local AI assistant configuration
-/.kilo/
-
 # LaTeX report sources and generated deliverables
 /report/
 /output/
@@ -16,3 +13,6 @@ __pycache__/
 /results/
 /*_accuracy.png
 /*_metrics.json
+
+# project instruction
+CSE256_PA1.pdf
