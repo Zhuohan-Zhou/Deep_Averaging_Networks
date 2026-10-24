@@ -1,9 +1,18 @@
+# macOS metadata
+.DS_Store
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# Local AI assistant configuration
+/.kilo/
+
 # LaTeX report sources and generated deliverables
 /report/
-/output/pdf/cse256_pa1_report.pdf
-/output/pdf/cse256_pa1_report_sources.zip
+/output/
 
-# Measurements generated for the report
-/results/report_bow/
-/results/report_word_glove/
-/results/report_word_random/
+# Generated experiment outputs
+/results/
+/*_accuracy.png
+/*_metrics.json
